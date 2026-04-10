@@ -1,0 +1,29 @@
+# --- sensitive files ---
+.env
+*.db
+*.sqlite
+
+# --- composer / dependencies ---
+vendor/
+
+# --- systems / os ---
+.DS_Store
+Thumbs.db
+
+# --- editors ---
+.vscode/
+.idea/
+
+# --- logs ---
+application/logs/
+!application/logs/index.html
+
+# --- cache ---
+application/cache/*
+!application/cache/index.html
+
+# --- user uploads / images ---
+test.png
+test_browser.js
+js_test.js
+test_waha.php

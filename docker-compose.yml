@@ -1,0 +1,50 @@
+# =============================================================================
+# WhatsApp CRM & Supervision System — Docker Compose
+# =============================================================================
+# Services:
+#   1. db   — PostgreSQL 16 (database storage)
+#   2. waha — WAHA WhatsApp HTTP API (message gateway)
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose down
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # WAHA — WhatsApp HTTP API (Core / Free Edition)
+  # ---------------------------------------------------------------------------
+  waha:
+    image: devlikeapro/waha
+    platform: linux/amd64
+    container_name: waha_api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # --- Authentication ---
+      WAHA_API_KEY: ${WAHA_API_KEY:-change_me_to_a_strong_secret}
+
+      # --- Global Webhook Config ---
+      # Points to the CodeIgniter webhook controller on the HOST machine.
+      # host.docker.internal resolves to the host's localhost from within Docker (macOS/Windows).
+      WHATSAPP_HOOK_URL: ${APP_BASE_URL:-http://host.docker.internal:8080}/webhook/receive
+      WHATSAPP_HOOK_EVENTS: "message,message.any,session.status"
+
+      # --- Engine Configuration ---
+      # NOWA (Baileys) is socket-based and bypasses WhatsApp browser restrictions
+      WHATSAPP_DEFAULT_ENGINE: NOWA
+
+      # --- Session Persistence ---
+      WAHA_WORKER_RESTART_SESSIONS: "True"
+    volumes:
+      - waha_sessions:/app/.sessions
+
+volumes:
+  pgdata:
+    driver: local
+  waha_sessions:
+    driver: local
