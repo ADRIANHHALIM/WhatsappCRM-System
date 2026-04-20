@@ -8,12 +8,13 @@ class Whatsapp extends CI_Controller {
         $this->load->library('session');
         $this->load->library('waha_lib');
         $this->load->model('Message_model');
+        $this->load->model('Contact_model');  // BUG 4 — was missing
         $this->load->model('Session_model');
         $this->load->model('Employee_model');
         $this->load->model('Audit_model');
         $this->load->helper('url');
 
-        // Force Jakarta Timezone for accurate logging and history
+        // BUG 5 — set timezone before any date() / strtotime() call
         date_default_timezone_set('Asia/Jakarta');
 
         if (!$this->session->userdata('logged_in')) {
@@ -48,11 +49,21 @@ class Whatsapp extends CI_Controller {
     public function get_qr($session_id) {
         $status_data = $this->waha_lib->get_session_status($session_id);
         
-        // Auto-initialize if session doesn't exist or is stopped
-        if (!$status_data || (isset($status_data['status']) && $status_data['status'] === 'STOPPED')) {
+        // Auto-initialize if session doesn't exist, is stopped, or has FAILED
+        $status = isset($status_data['status']) ? $status_data['status'] : 'STOPPED';
+        
+        if (!$status_data || in_array($status, ['STOPPED', 'FAILED'])) {
+            // If it failed, try to stop it first to clean up any stuck processes
+            if ($status === 'FAILED') {
+                log_message('error', "Whatsapp::get_qr — Session [{$session_id}] is FAILED. Attempting recovery...");
+                $this->waha_lib->stop_session($session_id);
+                sleep(1); // Give it a second to clean up
+            }
+            
             $this->waha_lib->create_session($session_id);
             $this->waha_lib->start_session($session_id);
             $status_data = $this->waha_lib->get_session_status($session_id);
+            $status = isset($status_data['status']) ? $status_data['status'] : 'STARTING';
         }
 
         $status = isset($status_data['status']) ? $status_data['status'] : 'STARTING';
@@ -244,7 +255,7 @@ class Whatsapp extends CI_Controller {
 
     /**
      * POST whatsapp/ajax_send_message
-     * Sends a message via WAHA and persists it to the DB.
+     * BUG 1 FIX: Only saves to DB after WAHA confirms delivery (HTTP 200/201).
      */
     public function ajax_send_message() {
         if ($this->input->method() !== 'post') {
@@ -255,23 +266,21 @@ class Whatsapp extends CI_Controller {
         $body        = trim($this->input->post('body'));
         $employee_id = $this->session->userdata('employee_id');
 
-        log_message('debug', "ajax_send_message: Attempting send to [{$phone_raw}] with body size [" . strlen($body) . " bytes]");
-
         if (empty($phone_raw) || empty($body)) {
             $this->_json(['status' => 'error', 'message' => 'phone_number and body are required'], 422);
         }
 
+        // Strip everything except digits — sendText() will append @c.us
         $to = preg_replace('/[^0-9]/', '', $phone_raw);
 
-        // Send via WAHA with detailed result tracking
+        log_message('debug', "ajax_send_message: to=[{$to}] body_len=[" . strlen($body) . "]");
+
         $res = $this->waha_lib->sendText('default', $to, $body);
 
-        log_message('debug', "ajax_send_message: WAHA response status [{$res['status']}] HTTP [{$res['http_code']}]");
-
-        // Strictly check for success (200/201) before persisting to DB
+        // BUG 1: Only insert into DB when WAHA returns 200 or 201
         if ($res['status'] === true) {
-            $waha_response = json_decode($res['response'], true);
-            $msg_id = (is_array($waha_response) && isset($waha_response['id'])) ? $waha_response['id'] : null;
+            $waha_resp = json_decode($res['response'], true);
+            $msg_id    = (is_array($waha_resp) && isset($waha_resp['id'])) ? $waha_resp['id'] : null;
 
             $this->Message_model->save_outgoing([
                 'waha_msg_id'   => $msg_id,
@@ -285,9 +294,11 @@ class Whatsapp extends CI_Controller {
             $this->Audit_model->log_action($employee_id, 'SEND_MESSAGE', "Sent to {$to}");
             $this->_json(['status' => 'ok']);
         } else {
-            // Log the exact rejection and report to frontend
-            log_message('error', "WAHA send failure (HTTP {$res['http_code']}): " . $res['response']);
-            $this->_json(['status' => 'error', 'message' => "WAHA rejected the request (HTTP {$res['http_code']})"], 502);
+            log_message('error', "ajax_send_message FAILED: HTTP {$res['http_code']} | {$res['response']}");
+            $this->_json([
+                'status'  => 'error',
+                'message' => 'WAHA rejected the send request (HTTP ' . $res['http_code'] . ')',
+            ], 502);
         }
     }
 
@@ -296,6 +307,43 @@ class Whatsapp extends CI_Controller {
     // =========================================================================
     public function ajax_get_messages($phone_number) {
         $this->ajax_get_chat_history($phone_number);
+    }
+
+    /**
+     * GET  whatsapp/proxy_avatar?url=...
+     * BUG 3 FIX: Proxies WAHA profile images server-side so the browser never
+     * needs to reach "http://localhost:3000" directly.
+     */
+    public function proxy_avatar() {
+        $url = $this->input->get('url');
+
+        if (empty($url)) {
+            http_response_code(400);
+            exit('Missing url parameter');
+        }
+
+        // Only allow proxying from the configured WAHA host (prevents open redirect)
+        $waha_host = rtrim(getenv('WAHA_HOST') ?: 'http://localhost:3000', '/');
+        if (strpos($url, $waha_host) !== 0 && strpos($url, 'http://localhost:3000') !== 0) {
+            http_response_code(403);
+            exit('Forbidden origin');
+        }
+
+        $binary = $this->waha_lib->fetch_image_binary($url);
+
+        if ($binary === FALSE) {
+            http_response_code(404);
+            exit;
+        }
+
+        // Detect content type from magic bytes
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $mime  = $finfo->buffer($binary) ?: 'image/jpeg';
+
+        header('Content-Type: ' . $mime);
+        header('Cache-Control: public, max-age=86400'); // Cache for 1 day
+        echo $binary;
+        exit;
     }
 
     // =========================================================================
@@ -311,7 +359,15 @@ class Whatsapp extends CI_Controller {
     }
 
     /**
-     * Format a DB timestamp into a human-friendly string:
+     * BUG 2 FIX: Format a DB timestamp into a human-friendly string.
+     * Relies on date_default_timezone_set('Asia/Jakarta') having been called
+     * in __construct(), so date() and strtotime() both work in local time.
+     *
+     * PostgreSQL stores timestamps as TIMESTAMPTZ (UTC). When PHP reads them
+     * via the pgsql driver they arrive as strings like "2026-04-10 09:23:45+00".
+     * strtotime() correctly parses the +00 offset and converts to local time
+     * once the PHP timezone is set to Asia/Jakarta.
+     *
      *   - Today      → "15:23"
      *   - Yesterday  → "Yesterday"
      *   - This week  → "Mon"
@@ -319,12 +375,17 @@ class Whatsapp extends CI_Controller {
      */
     private function _format_ts($ts) {
         if (empty($ts)) return '';
-        $now  = time();
-        $dt   = strtotime($ts);
-        $diff = $now - $dt;
-        if ($diff < 86400 && date('d', $now) === date('d', $dt))   return date('H:i', $dt);
-        if ($diff < 172800 && date('d', $now) !== date('d', $dt))  return 'Yesterday';
-        if ($diff < 604800) return date('D', $dt);
+
+        $dt = strtotime($ts);
+        if ($dt === FALSE || $dt <= 0) return '';
+
+        $now       = time();
+        $today     = strtotime('today midnight');
+        $yesterday = strtotime('yesterday midnight');
+
+        if ($dt >= $today)           return date('H:i', $dt);
+        if ($dt >= $yesterday)       return 'Yesterday';
+        if ($now - $dt < 604800)     return date('D', $dt);   // within 7 days
         return date('d/m', $dt);
     }
 

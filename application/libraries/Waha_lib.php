@@ -172,7 +172,7 @@ class Waha_lib
      */
     public function get_recent_chats($session, $limit = 20)
     {
-        return $this->_request('GET', '/api/' . urlencode($session) . '/chats?limit=' . (int)$limit);
+        return $this->_request('GET', '/api/' . urlencode($session) . '/chats?limit=' . (int) $limit);
     }
 
     // =========================================================================
@@ -190,9 +190,10 @@ class Waha_lib
     {
         $endpoint = '/api/' . urlencode($name) . '/auth/qr';
         $raw = $this->_request_raw('GET', $endpoint);
-        
-        if ($raw === FALSE) return FALSE;
-        
+
+        if ($raw === FALSE)
+            return FALSE;
+
         if ($format === 'base64') {
             return 'data:image/png;base64,' . base64_encode($raw);
         }
@@ -216,9 +217,11 @@ class Waha_lib
         // 1. Format the phone number into a chatId if missing suffix
         $chatId = trim($phone);
         if (strpos($chatId, '@') === FALSE) {
-            // Strip any non-numeric for cleanliness if it's a raw number
+            // Strip non-numerics and append @c.us for personal numbers
             $chatId = preg_replace('/[^0-9]/', '', $chatId) . '@c.us';
         }
+        // Ensure group JIDs keep their @g.us suffix intact (no double append)
+        // at this point $chatId already has a '@' so nothing more to do.
 
         $data = array(
             'session' => $session,
@@ -226,17 +229,21 @@ class Waha_lib
             'text' => $text,
         );
 
-        // 2. Perform request
-        $result = $this->_request('POST', '/api/sendText', $data);
+        log_message('debug', "Waha_lib::sendText — chatId=[{$chatId}] session=[{$session}]");
+
+        // 2. Perform request — _request stores last_http_code even on failure
+        $this->_request('POST', '/api/sendText', $data);
         $code = $this->last_http_code;
 
-        // 3. Status is true if code is 200 or 201
+        // 3. Status is true only for 200 or 201
         $status = ($code === 200 || $code === 201);
+
+        log_message('debug', "Waha_lib::sendText — HTTP [{$code}] status=[" . ($status ? 'OK' : 'FAIL') . "] response=[{$this->last_response}]");
 
         return array(
             'status' => $status,
             'response' => $this->last_response,
-            'http_code' => $code
+            'http_code' => $code,
         );
     }
 
@@ -359,36 +366,34 @@ class Waha_lib
         }
 
         $response = curl_exec($ch);
+        // CRITICAL: always capture http_code and raw response BEFORE any early return.
+        // sendText() reads $this->last_http_code to determine success/failure.
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $this->last_http_code = $http_code;
-        $this->last_response = $response;
+        $this->last_response = ($response !== FALSE) ? $response : '';
         $error = curl_error($ch);
 
         curl_close($ch);
 
-        // Handle cURL errors
+        // Handle cURL transport errors
         if ($response === FALSE) {
             log_message('error', "Waha_lib: cURL error on {$method} {$endpoint}: {$error} | Payload: {$this->last_payload}");
             return FALSE;
         }
 
-        // Log non-2xx responses with full payload context
+        // Log non-2xx responses with full payload context, then return FALSE
         if ($http_code < 200 || $http_code >= 300) {
             log_message('error', "Waha_lib: HTTP {$http_code} on {$method} {$endpoint} | Payload: {$this->last_payload} | Response: {$response}");
             return FALSE;
         }
 
-        $decoded = json_decode($response, TRUE);
-
-        if ($decoded !== null) return $decoded;
-        
-        // If response was successful (2xx) but empty, return an empty array 
-        // to ensure it's "truthy" in the calling controller.
+        // Empty 2xx body (e.g. 201 Created with no content)
         if (trim($response) === '') {
             return array('status' => 'ok');
         }
-        
-        return $response;
+
+        $decoded = json_decode($response, TRUE);
+        return ($decoded !== null) ? $decoded : $response;
     }
 
     /**
@@ -451,14 +456,38 @@ class Waha_lib
      */
     private function _format_chat_id($phone)
     {
-        // Remove any non-numeric characters except leading '+'
-        $phone = preg_replace('/[^\d]/', '', $phone);
-
-        // Ensure it doesn't already have @c.us
+        // If the phone already contains a '@' it is a full JID — return as-is
+        // e.g. '6281234567890@c.us' or '120363...@g.us'
         if (strpos($phone, '@') !== FALSE) {
             return $phone;
         }
 
+        // Strip everything except digits
+        $phone = preg_replace('/[^\d]/', '', $phone);
+
         return $phone . '@c.us';
+    }
+
+    /**
+     * Proxy a WAHA profile-picture URL through the CI server.
+     * Fetches the image from WAHA and returns the raw binary.
+     *
+     * @param  string $url  Full URL to the WAHA-served image
+     * @return string|false Binary image data or FALSE
+     */
+    public function fetch_image_binary($url)
+    {
+        $ch = curl_init();
+        curl_setopt_array($ch, array(
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => TRUE,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_SSL_VERIFYPEER => FALSE,
+            CURLOPT_HTTPHEADER => array('X-Api-Key: ' . $this->api_key),
+        ));
+        $data = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        return ($data !== FALSE && $code >= 200 && $code < 300) ? $data : FALSE;
     }
 }

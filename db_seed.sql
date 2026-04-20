@@ -7,14 +7,14 @@ VALUES
 (
   'Ka Roseuphoria', 
   'owner', 
-  '$2y$10$bOOWx7i4iB5B/X0J0sI51e4Nq/hA48xW2wL57QpZ/FOf9X4x45m5G', 
+  '$2y$12$D.347Bhgl4rrPpJZ67wkyu4SSyIQ7SUs7DBeCLTl3.VlMSLkAd2hm', 
   'owner', 
   TRUE
 ),
 (
   'Adrian', 
   'adrian', 
-  '$2y$10$bOOWx7i4iB5B/X0J0sI51e4Nq/hA48xW2wL57QpZ/FOf9X4x45m5G', 
+  '$2y$12$D.347Bhgl4rrPpJZ67wkyu4SSyIQ7SUs7DBeCLTl3.VlMSLkAd2hm', 
   'staff', 
   TRUE
 );
