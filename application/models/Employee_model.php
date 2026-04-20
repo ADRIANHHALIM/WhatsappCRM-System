@@ -11,7 +11,7 @@ class Employee_model extends CI_Model {
     }
 
     public function get_by_username($username) {
-        $sql = "SELECT id, fullname, username, password, role, is_active FROM {$this->table} WHERE username = ? LIMIT 1";
+        $sql = "SELECT id, fullname, username, password, role, is_active FROM {$this->table} WHERE LOWER(username) = LOWER(?) LIMIT 1";
         $query = $this->db->query($sql, array($username));
         return $query->row_array();
     }
